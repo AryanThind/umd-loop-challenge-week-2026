@@ -1,0 +1,71 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="vehicle_world">
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"></plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"></plugin>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"></plugin>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"></plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>50 50</size></plane></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obstacle_1">
+      <static>true</static>
+      <pose>3 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1 3 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1 3 1</size></box></geometry>
+          <material><ambient>0.5 0.3 0.2 1</ambient><diffuse>0.5 0.3 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="obstacle_2">
+      <static>true</static>
+      <pose>6 -2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1 3 1</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1 3 1</size></box></geometry>
+          <material><ambient>0.5 0.3 0.2 1</ambient><diffuse>0.5 0.3 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="vehicle">
+      <pose>0 0 0.15 0 0 0</pose>
+      <link name="base_link">
+        <inertial>
+          <mass>1.0</mass>
+          <inertia><ixx>0.05</ixx><iyy>0.05</iyy><izz>0.05</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="collision"><geometry><box><size>0.5 0.3 0.3</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.5 0.3 0.3</size></box></geometry>
+          <material><ambient>0.1 0.5 0.9 1</ambient><diffuse>0.1 0.5 0.9 1</diffuse></material></visual>
+      </link>
+      <plugin filename="gz-sim-velocity-control-system" name="gz::sim::systems::VelocityControl">
+        <link_name>base_link</link_name>
+      </plugin>
+      <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+        <publish_link_pose>false</publish_link_pose>
+	<publish_model_pose>true</publish_model_pose>
+        <update_frequency>30</update_frequency>
+	<use_pose_vector_msg>true</use_pose_vector_msg>
+      </plugin>
+    </model>
+  </world>
+</sdf>
