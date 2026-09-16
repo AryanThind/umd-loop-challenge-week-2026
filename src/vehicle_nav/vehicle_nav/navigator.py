@@ -7,26 +7,24 @@ from geometry_msgs.msg import Twist, PoseArray
 from nav_msgs.msg import Path
 
 
-# Obstacles as rectangles, matching vehicle_world.sdf box sizes (1 x 3),
-# so we can reason about them as actual shapes, not just circles.
-# cx, cy = center, hx, hy = half-width/half-height
 OBSTACLES = [
     {'cx': 3.0, 'cy': 0.0, 'hx': 0.5, 'hy': 1.5},
     {'cx': 6.0, 'cy': -2.0, 'hx': 0.5, 'hy': 1.5},
 ]
-
-MARGIN = 0.8            # safety inflation around each obstacle (vehicle size + buffer)
-STANDOFF = 1.0           # desired distance to keep from an obstacle while wall-following
-ENTER_DIST = 0.35        # how close (to the inflated boundary) triggers wall-following
-EXIT_CLEAR_DIST = 1.3    # must be at least this far from the obstacle to exit wall-following
+MARGIN = 0.6
 
 WAYPOINT_TOLERANCE = 0.4
-FORWARD_SPEED = 0.6
-FOLLOW_SPEED = 0.35
-TURN_SPEED = 1.0
+FORWARD_SPEED = 1.0
+TURN_SPEED = 1.4
 
-STUCK_CHECK_TICKS = 15
-STUCK_DISTANCE_THRESH = 0.08
+DETECT_RANGE = 2.0         # start turning when this close to an obstacle's edge
+DETECT_CONE_DEG = 60
+CLEAR_CONE_DEG = 65
+CLEAR_SUSTAIN_TICKS = 5    # ~0.8s of being clear before we stop turning
+CLEAR_DRIVE_DISTANCE = 1.0
+
+STUCK_CHECK_TICKS = 25
+STUCK_DISTANCE_THRESH = 0.12
 RECOVERY_TICKS = 20
 
 
@@ -51,29 +49,10 @@ def nearest_point_and_normal(px, py, obs):
     dx, dy = px - nx, py - ny
     dist = math.hypot(dx, dy)
     if dist > 1e-6:
-        normal = (dx / dist, dy / dist)
-    else:
-        # We're inside the inflated box (shouldn't normally happen); push
-        # away from the obstacle's center as a fallback
-        fx, fy = px - obs['cx'], py - obs['cy']
-        fdist = math.hypot(fx, fy) or 1.0
-        normal = (fx / fdist, fy / fdist)
-    return nx, ny, normal, dist
-
-
-def point_in_inflated_rect(px, py, obs):
-    hx, hy = obs['hx'] + MARGIN, obs['hy'] + MARGIN
-    return abs(px - obs['cx']) <= hx and abs(py - obs['cy']) <= hy
-
-
-def path_blocked_by(obs, x1, y1, x2, y2, samples=12):
-    for i in range(samples + 1):
-        t = i / samples
-        px = x1 + (x2 - x1) * t
-        py = y1 + (y2 - y1) * t
-        if point_in_inflated_rect(px, py, obs):
-            return True
-    return False
+        return (dx / dist, dy / dist), dist
+    fx, fy = px - obs['cx'], py - obs['cy']
+    fdist = math.hypot(fx, fy) or 1.0
+    return (fx / fdist, fy / fdist), 0.0
 
 
 class Navigator(Node):
@@ -96,16 +75,17 @@ class Navigator(Node):
         self.current_yaw = None
         self.finished = False
 
-        self.state = 'GO_TO_GOAL'   # or 'WALL_FOLLOW'
-        self.wall_obstacle = None
-        self.wall_side = 0.0        # +1 = counter-clockwise, -1 = clockwise
+        self.state = 'SEEKING'   # SEEKING, TURNING, CLEARING
+        self.turn_direction = 1.0
+        self.clear_counter = 0
+        self.clear_drive_start = None
 
         self.check_pos = None
         self.stuck_counter = 0
         self.recovering = False
         self.recovery_counter = 0
-        self.recovery_direction = 1.0
 
+        self._tick_count = 0
         self.timer = self.create_timer(0.1, self.control_loop)
         self.get_logger().info('Navigator started, waiting for waypoints and pose...')
 
@@ -120,6 +100,22 @@ class Navigator(Node):
             self.current_x = pose.position.x
             self.current_y = pose.position.y
             self.current_yaw = yaw_from_quaternion(pose.orientation)
+
+    def nearest_obstacle_ahead(self):
+        # Returns (angle_diff, signed_offset, dist, normal) for the closest
+        # relevant obstacle, using its real rectangular shape
+        best = None
+        for obs in OBSTACLES:
+            (nx_dir, ny_dir), dist = nearest_point_and_normal(self.current_x, self.current_y, obs)
+            if dist > DETECT_RANGE:
+                continue
+            # direction FROM vehicle TOWARD the obstacle is opposite the normal
+            angle_to_obstacle = math.atan2(-ny_dir, -nx_dir)
+            signed_offset = normalize_angle(angle_to_obstacle - self.current_yaw)
+            angle_diff = abs(signed_offset)
+            if best is None or dist < best[2]:
+                best = (angle_diff, signed_offset, dist, (nx_dir, ny_dir))
+        return best
 
     def check_if_stuck(self):
         if self.check_pos is None:
@@ -146,13 +142,13 @@ class Navigator(Node):
         if self.recovering:
             self.recovery_counter += 1
             cmd.linear.x = -0.3
-            cmd.angular.z = TURN_SPEED * self.recovery_direction
+            cmd.angular.z = TURN_SPEED * self.turn_direction
             self.cmd_pub.publish(cmd)
             if self.recovery_counter >= RECOVERY_TICKS:
                 self.recovering = False
-                self.state = 'GO_TO_GOAL'
-                self.wall_obstacle = None
-                self.get_logger().info('Recovery maneuver complete, resuming navigation.')
+                self.state = 'SEEKING'
+                self.check_pos = None
+                self.get_logger().info('Recovery complete, resuming navigation.')
             return
 
         goal_x, goal_y = self.waypoints[self.current_index]
@@ -163,8 +159,7 @@ class Navigator(Node):
         if distance < WAYPOINT_TOLERANCE:
             self.get_logger().info(f'Reached waypoint {self.current_index + 1}/{len(self.waypoints)}.')
             self.current_index += 1
-            self.state = 'GO_TO_GOAL'
-            self.wall_obstacle = None
+            self.state = 'SEEKING'
             self.check_pos = None
             if self.current_index >= len(self.waypoints):
                 self.finished = True
@@ -172,67 +167,82 @@ class Navigator(Node):
                 self.get_logger().info('All waypoints reached. Done.')
             return
 
-        if self.check_if_stuck():
-            self.recovering = True
-            self.recovery_counter = 0
-            self.recovery_direction = -self.wall_side if self.wall_side != 0 else 1.0
-            self.get_logger().info('Stuck detected! Backing up and turning to recover.')
-            return
+        obstacle = self.nearest_obstacle_ahead()
 
-        if self.state == 'WALL_FOLLOW':
-            obs = self.wall_obstacle
-            nx, ny, normal, dist_to_boundary = nearest_point_and_normal(self.current_x, self.current_y, obs)
-            path_clear = not path_blocked_by(obs, self.current_x, self.current_y, goal_x, goal_y)
-
-            if path_clear and dist_to_boundary > EXIT_CLEAR_DIST:
-                self.state = 'GO_TO_GOAL'
-                self.wall_obstacle = None
-                self.get_logger().info('Path to waypoint is clear, leaving wall-follow mode.')
-            else:
-                side = self.wall_side
-                tangent = (-normal[1] * side, normal[0] * side)
-                standoff_error = dist_to_boundary - STANDOFF
-                # blend: mostly move along the wall, nudge toward/away to hold standoff distance
-                desired_x = tangent[0] + normal[0] * (-standoff_error) * 0.6
-                desired_y = tangent[1] + normal[1] * (-standoff_error) * 0.6
-                desired_heading = math.atan2(desired_y, desired_x)
-                angle_error = normalize_angle(desired_heading - self.current_yaw)
-                cmd.angular.z = max(-TURN_SPEED, min(TURN_SPEED, 2.0 * angle_error))
-                cmd.linear.x = FOLLOW_SPEED if abs(angle_error) < math.radians(60) else 0.1
+        # ---------------- TURNING ----------------
+        if self.state == 'TURNING':
+            still_blocked = obstacle is not None and obstacle[0] < math.radians(CLEAR_CONE_DEG)
+            if still_blocked:
+                self.clear_counter = 0
+                cmd.angular.z = TURN_SPEED * self.turn_direction
+                cmd.linear.x = 0.0
                 self.cmd_pub.publish(cmd)
                 return
+            else:
+                self.clear_counter += 1
+                cmd.angular.z = TURN_SPEED * self.turn_direction * 0.4
+                cmd.linear.x = 0.0
+                self.cmd_pub.publish(cmd)
+                if self.clear_counter >= CLEAR_SUSTAIN_TICKS:
+                    self.state = 'CLEARING'
+                    self.clear_drive_start = (self.current_x, self.current_y)
+                    self.get_logger().info('Clear of obstacle - driving forward to get past it.')
+                return
 
-        # --- GO_TO_GOAL state ---
-        react_obstacle = None
-        for obs in OBSTACLES:
-            nx, ny, normal, dist_to_boundary = nearest_point_and_normal(self.current_x, self.current_y, obs)
-            blocked = path_blocked_by(obs, self.current_x, self.current_y, goal_x, goal_y)
-            if dist_to_boundary < ENTER_DIST or (blocked and dist_to_boundary < 3.0):
-                react_obstacle = obs
-                react_normal = normal
-                break
+        # ---------------- CLEARING ----------------
+        if self.state == 'CLEARING':
+            traveled = math.hypot(self.current_x - self.clear_drive_start[0],
+                                   self.current_y - self.clear_drive_start[1])
+            reblocked = obstacle is not None and obstacle[0] < math.radians(DETECT_CONE_DEG)
+            if reblocked:
+                self.state = 'TURNING'
+                self.turn_direction = -1.0 if obstacle[1] > 0 else 1.0
+                self.get_logger().info('Obstacle reappeared while clearing - turning again.')
+                return
+            if traveled >= CLEAR_DRIVE_DISTANCE:
+                self.state = 'SEEKING'
+                self.check_pos = None
+                self.get_logger().info('Finished clearing obstacle, resuming toward waypoint.')
+            else:
+                cmd.linear.x = FORWARD_SPEED
+                cmd.angular.z = 0.0
+                self.cmd_pub.publish(cmd)
+                if self.check_if_stuck():
+                    self.recovering = True
+                    self.recovery_counter = 0
+                    self.get_logger().info('Stuck while clearing! Backing up.')
+                return
 
-        if react_obstacle is not None:
-            # Decide which side to go around: whichever side points more
-            # toward the goal direction
-            goal_heading = math.atan2(dy, dx)
-            tangent_ccw = (-react_normal[1], react_normal[0])
-            heading_ccw = math.atan2(tangent_ccw[1], tangent_ccw[0])
-            diff_ccw = abs(normalize_angle(heading_ccw - goal_heading))
-            side = 1.0 if diff_ccw < math.pi / 2 else -1.0
-
-            self.state = 'WALL_FOLLOW'
-            self.wall_obstacle = react_obstacle
-            self.wall_side = side
-            self.get_logger().info(
-                f'Obstacle encountered, entering wall-follow (side={"CCW" if side > 0 else "CW"}).')
+        # ---------------- SEEKING ----------------
+        if obstacle is not None and obstacle[0] < math.radians(DETECT_CONE_DEG):
+            angle_diff, signed_offset, dist, normal = obstacle
+            self.state = 'TURNING'
+            self.turn_direction = -1.0 if signed_offset > 0 else 1.0
+            self.clear_counter = 0
+            self.get_logger().info(f'Obstacle detected at {dist:.2f}m - turning.')
             return
 
         goal_heading = math.atan2(dy, dx)
         angle_error = normalize_angle(goal_heading - self.current_yaw)
+        aligned = abs(angle_error) < math.radians(25)
+
         cmd.angular.z = max(-TURN_SPEED, min(TURN_SPEED, 2.0 * angle_error))
-        cmd.linear.x = FORWARD_SPEED if abs(angle_error) < math.radians(30) else 0.15
+        cmd.linear.x = FORWARD_SPEED if aligned else 0.1
         self.cmd_pub.publish(cmd)
+
+        if aligned:
+            if self.check_if_stuck():
+                self.state = 'TURNING'
+                self.turn_direction = 1.0 if (self._tick_count % 2 == 0) else -1.0
+                self.get_logger().info('Stuck while seeking! Forcing a turn.')
+        else:
+            self.check_pos = None
+
+        self._tick_count += 1
+        if self._tick_count % 10 == 0:
+            self.get_logger().info(
+                f'[STATUS] state={self.state} goal={self.current_index + 1}/{len(self.waypoints)} '
+                f'dist_to_goal={distance:.2f}m pos=({self.current_x:.2f},{self.current_y:.2f})')
 
 
 def main(args=None):
