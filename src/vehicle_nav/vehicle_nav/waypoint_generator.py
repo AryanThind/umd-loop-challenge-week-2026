@@ -11,9 +11,11 @@ from geometry_msgs.msg import PoseStamped
 # Must match navigator.py's obstacle definitions
 OBSTACLES = [
     {'cx': 3.0, 'cy': 0.0, 'hx': 0.5, 'hy': 1.5},
-    {'cx': 6.0, 'cy': -2.0, 'hx': 0.5, 'hy': 1.5},
+    {'cx': 7.0, 'cy': -3.0, 'hx': 0.5, 'hy': 1.5},
+    {'cx': 5.0, 'cy': 3.0, 'hx': 1.5, 'hy': 0.5},
+    {'cx': 9.0, 'cy': 0.0, 'hx': 0.6, 'hy': 0.6},
 ]
-EXCLUSION_MARGIN = 1.2   # keep waypoints at least this far from any obstacle edge
+EXCLUSION_MARGIN = 0.8   # keep waypoints at least this far from any obstacle edge
 
 
 def too_close_to_obstacle(x, y):
@@ -37,8 +39,8 @@ class WaypointGenerator(Node):
         self.publisher_ = self.create_publisher(Path, 'waypoints', qos)
 
         num_waypoints = 4
-        x_range = (2.0, 8.0)
-        y_range = (-3.0, 3.0)
+        x_range = (2.0, 10.0)
+        y_range = (-4.0, 4.0)
 
         path_msg = Path()
         path_msg.header.frame_id = 'world'

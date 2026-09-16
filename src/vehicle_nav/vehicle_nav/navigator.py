@@ -9,7 +9,9 @@ from nav_msgs.msg import Path
 
 OBSTACLES = [
     {'cx': 3.0, 'cy': 0.0, 'hx': 0.5, 'hy': 1.5},
-    {'cx': 6.0, 'cy': -2.0, 'hx': 0.5, 'hy': 1.5},
+    {'cx': 7.0, 'cy': -3.0, 'hx': 0.5, 'hy': 1.5},
+    {'cx': 5.0, 'cy': 3.0, 'hx': 1.5, 'hy': 0.5},
+    {'cx': 9.0, 'cy': 0.0, 'hx': 0.6, 'hy': 0.6},
 ]
 MARGIN = 0.6
 
@@ -17,9 +19,9 @@ WAYPOINT_TOLERANCE = 0.4
 FORWARD_SPEED = 1.0
 TURN_SPEED = 1.4
 
-DETECT_RANGE = 2.0         # start turning when this close to an obstacle's edge
-DETECT_CONE_DEG = 60
-CLEAR_CONE_DEG = 65
+DETECT_RANGE = 1.3         # start turning when this close to an obstacle's edge
+DETECT_CONE_DEG = 50
+CLEAR_CONE_DEG = 55
 CLEAR_SUSTAIN_TICKS = 5    # ~0.8s of being clear before we stop turning
 CLEAR_DRIVE_DISTANCE = 1.0
 
